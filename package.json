@@ -1,9 +1,10 @@
 {
-  "name": "wddst-render-connection-test",
-  "version": "0.1.0",
+  "name": "wddst-room-gateway",
+  "version": "0.2.0",
   "private": true,
-  "description": "WDDST Render WebSocket connectivity test, not the finished Godot multiplayer server",
-  "main": "server.js",
   "scripts": { "start": "node server.js" },
-  "dependencies": { "ws": "^8.18.0" }
+  "dependencies": {
+    "ws": "^8.18.0",
+    "firebase-admin": "^13.0.0"
+  }
 }
