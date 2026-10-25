@@ -151,7 +151,7 @@ const server = http.createServer((req, res) => {
 });
 const wss = new WebSocketServer({server,path:'/room',maxPayload:8192});
 wss.on('connection', ws => {
-  ws.room=null; ws.position={x:0,y:0,z:0}; ws.lastMove=0;
+  ws.room=null; ws.position={x:0,y:0,z:0,yaw:0}; ws.appearance={}; ws.lastMove=0; ws.hasPosition=false;
   const deadline=setTimeout(()=>{if(!ws.room)ws.close(1008,'Authentication required');},10000);
   ws.on('message', async raw => {
     let msg;
@@ -176,11 +176,24 @@ wss.on('connection', ws => {
         clients.set(ws.room,group);
         send(ws,{type:'joined',room:ws.room,uid:ws.uid});
         roster(ws.room);
-        send(ws,{type:'snapshot',players:[...group].map(p=>({uid:p.uid,name:p.displayName,...p.position}))});
+        send(ws,{type:'snapshot',players:[...group].map(p=>({uid:p.uid,name:p.displayName,...p.position,appearance:p.appearance}))});
       }catch(err){send(ws,{type:'error',message:'Join rejected: '+err.message});ws.close(1008,'Unauthorized');}
       return;
     }
     if (msg.type === 'ping') send(ws,{type:'pong',room:ws.room});
+    else if (msg.type === 'appearance') {
+      const value = msg.appearance;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+      const allowed = ['archetype','outfit','hair_style','hair_color','eye_color','height','skin','build','strength','glasses','age'];
+      const clean = {};
+      for (const key of allowed) {
+        const v = value[key];
+        if (typeof v === 'string' && v.length <= 32) clean[key] = v;
+        else if (typeof v === 'number' && Number.isFinite(v)) clean[key] = Math.max(-100,Math.min(100,v));
+      }
+      ws.appearance = clean;
+      for (const other of clients.get(ws.room)||[]) if(other!==ws) send(other,{type:'appearance',uid:ws.uid,appearance:clean});
+    }
     else if (msg.type === 'move') {
       const xyz=['x','y','z'];
       if (!xyz.every(k=>typeof msg[k]==='number'&&Number.isFinite(msg[k])))return send(ws,{type:'error',message:'Invalid position'});
@@ -189,8 +202,8 @@ wss.on('connection', ws => {
       const old=ws.position;
       const distance=Math.hypot(msg.x-old.x,msg.y-old.y,msg.z-old.z);
       // A basic speed guard; not yet authoritative physics or anti-cheat.
-      if(distance>10)return send(ws,{type:'error',message:'Movement too large'});
-      ws.position={x:msg.x,y:msg.y,z:msg.z};
+      if(ws.hasPosition && distance>10)return send(ws,{type:'error',message:'Movement too large'});
+      ws.position={x:msg.x,y:msg.y,z:msg.z,yaw:(typeof msg.yaw === "number" && Number.isFinite(msg.yaw) ? msg.yaw : 0)}; ws.hasPosition=true;
       for(const other of clients.get(ws.room)||[])if(other!==ws)send(other,{type:'position',uid:ws.uid,name:ws.displayName,...ws.position});
     }
     else send(ws,{type:'error',message:'Unsupported message'});
