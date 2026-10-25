@@ -41,6 +41,7 @@ function detach(ws) {
   if (!ws.room) return;
   const room = ws.room;
   clients.get(room)?.delete(ws);
+  for(const other of clients.get(room)||[])send(other,{type:'left',uid:ws.uid});
   if (clients.get(room)?.size === 0) clients.delete(room);
   ws.room = null;
   roster(room);
@@ -55,7 +56,7 @@ small{color:#bca88b}</style></head><body>
 <h1>we don't discuss such things.</h1><p>Maple Court / The Guest Book</p>
 <p><input id="code" maxlength="6" placeholder="ROOM CODE" /><button id="join">JOIN + TEST</button></p>
 <pre id="out">Ready. Use an existing WDDST Firebase room code.</pre>
-<small>This checks Firebase identity, lobby membership, and Render WebSockets. No 3D gameplay yet.</small>
+<small>Authenticated room movement test. Arrow keys / WASD move your test marker after joining. This is not the 3D game.</small><p><canvas id="map" width="500" height="250" style="max-width:100%;border:1px solid #ab8356;background:#28231e"></canvas></p>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
@@ -68,6 +69,35 @@ firebase.initializeApp({
  appId:'1:396527803772:web:4dede2551827b37e3458f9'
 });
 let socket;
+let myUid=''; const markers=new Map();
+const keys=new Set();
+window.addEventListener('keydown',e=>{if(['w','a','s','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){keys.add(e.key);e.preventDefault();}});
+window.addEventListener('keyup',e=>keys.delete(e.key));
+function draw(){
+ const c=document.getElementById('map'),ctx=c.getContext('2d');
+ ctx.clearRect(0,0,c.width,c.height); ctx.fillStyle='#41392d';ctx.fillRect(0,95,500,60);
+ ctx.strokeStyle='#9c876c';ctx.strokeRect(0,0,500,250);
+ for(const [uid,p] of markers){
+  const x=250+p.x*3,z=125+p.z*3;ctx.beginPath();ctx.arc(x,z,8,0,Math.PI*2);
+  ctx.fillStyle=uid===myUid?'#efb86e':'#8cbeac';ctx.fill();ctx.fillStyle='#f4e6ce';ctx.font='12px Georgia';ctx.fillText(p.name||'Guest',x+12,z+3);
+ }
+ requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+setInterval(()=>{
+ if(!socket||socket.readyState!==WebSocket.OPEN||!myUid)return;
+ const p=markers.get(myUid)||{x:0,y:0,z:0,name:'Browser Guest'};
+ let dx=0,dz=0;
+ if(keys.has('a')||keys.has('ArrowLeft'))dx-=1;
+ if(keys.has('d')||keys.has('ArrowRight'))dx+=1;
+ if(keys.has('w')||keys.has('ArrowUp'))dz-=1;
+ if(keys.has('s')||keys.has('ArrowDown'))dz+=1;
+ if(dx===0&&dz===0)return;
+ const n=Math.hypot(dx,dz);p.x=Math.max(-50,Math.min(50,p.x+dx/n*.3));p.z=Math.max(-35,Math.min(35,p.z+dz/n*.3));
+ markers.set(myUid,p);
+ socket.send(JSON.stringify({type:'move',x:p.x,y:0,z:p.z}));
+},100);
+
 const output=document.getElementById('out');
 const log=(s)=>{output.textContent+='\\n'+s;};
 document.getElementById('join').onclick=async()=>{
@@ -94,10 +124,13 @@ document.getElementById('join').onclick=async()=>{
   socket.onmessage=e=>{
     const m=JSON.parse(e.data);
     if(m.type==='joined'){
-      log('SUCCESS: authenticated WebSocket joined room '+m.room);
+      myUid=m.uid; markers.set(myUid,{x:0,y:0,z:0,name:'Browser Guest'});log('SUCCESS: authenticated WebSocket joined room '+m.room);
       socket.send(JSON.stringify({type:'ping'}));
     } else if(m.type==='pong') log('SUCCESS: room message exchanged.');
     else if(m.type==='roster') log('Connected peers: '+m.players.length);
+    else if(m.type==='snapshot'){markers.clear();for(const p of m.players)markers.set(p.uid,p);}
+    else if(m.type==='position'){markers.set(m.uid,{x:m.x,y:m.y,z:m.z,name:m.name});}
+    else if(m.type==='left'){markers.delete(m.uid);}
     else if(m.type==='error') log('SERVER ERROR: '+m.message);
   };
   socket.onerror=()=>log('WebSocket connection error.');
@@ -110,7 +143,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.url === '/health') {
     res.writeHead(200, {'Content-Type':'application/json'});
-    return res.end(JSON.stringify({ok:true,service:'WDDST authenticated room gateway',gameplayReady:false}));
+    return res.end(JSON.stringify({ok:true,service:'WDDST authenticated room gateway',gameplayReady:false,movementPreview:true}));
   }
   if (req.url !== '/') {res.writeHead(404);return res.end('Not found');}
   res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
@@ -118,7 +151,7 @@ const server = http.createServer((req, res) => {
 });
 const wss = new WebSocketServer({server,path:'/room',maxPayload:8192});
 wss.on('connection', ws => {
-  ws.room=null;
+  ws.room=null; ws.position={x:0,y:0,z:0}; ws.lastMove=0;
   const deadline=setTimeout(()=>{if(!ws.room)ws.close(1008,'Authentication required');},10000);
   ws.on('message', async raw => {
     let msg;
@@ -143,11 +176,24 @@ wss.on('connection', ws => {
         clients.set(ws.room,group);
         send(ws,{type:'joined',room:ws.room,uid:ws.uid});
         roster(ws.room);
+        send(ws,{type:'snapshot',players:[...group].map(p=>({uid:p.uid,name:p.displayName,...p.position}))});
       }catch(err){send(ws,{type:'error',message:'Join rejected: '+err.message});ws.close(1008,'Unauthorized');}
       return;
     }
     if (msg.type === 'ping') send(ws,{type:'pong',room:ws.room});
-    else send(ws,{type:'error',message:'Gameplay protocol not implemented yet'});
+    else if (msg.type === 'move') {
+      const xyz=['x','y','z'];
+      if (!xyz.every(k=>typeof msg[k]==='number'&&Number.isFinite(msg[k])))return send(ws,{type:'error',message:'Invalid position'});
+      if(Math.abs(msg.x)>500||Math.abs(msg.y)>100||Math.abs(msg.z)>500)return send(ws,{type:'error',message:'Out of bounds'});
+      const now=Date.now();if(now-ws.lastMove<45)return;ws.lastMove=now;
+      const old=ws.position;
+      const distance=Math.hypot(msg.x-old.x,msg.y-old.y,msg.z-old.z);
+      // A basic speed guard; not yet authoritative physics or anti-cheat.
+      if(distance>10)return send(ws,{type:'error',message:'Movement too large'});
+      ws.position={x:msg.x,y:msg.y,z:msg.z};
+      for(const other of clients.get(ws.room)||[])if(other!==ws)send(other,{type:'position',uid:ws.uid,name:ws.displayName,...ws.position});
+    }
+    else send(ws,{type:'error',message:'Unsupported message'});
   });
   ws.on('close',()=>{clearTimeout(deadline);detach(ws);});
   ws.on('error',()=>{});
